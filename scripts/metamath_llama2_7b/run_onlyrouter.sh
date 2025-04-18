@@ -1,5 +1,5 @@
 BASE_MODEL="/ceph/home/muhan01/tpz/transmoe/alpaca/output/alpacamoe-2-7B"
-OUTPUT_PATH="output/metamath-FullFT-LlamaMoe-2-7b"
+OUTPUT_PATH="output/metamath-OnlyRouter-LlamaMoe-2-7b"
 DATA_PATH="/ceph/home/muhan01/tpz/PiSSA/pissa-dataset"
 export HF_ENDPOINT=https://hf-mirror.com
 
@@ -8,6 +8,7 @@ deepspeed --master_port=16971 --include=localhost:0,1,2,3 train.py \
     --deepspeed configs/ds_config_zero2_no_offload.json \
     --model_name_or_path $BASE_MODEL \
     --full_finetune True \
+    --router_only True \
     --bf16 \
     --data_path $DATA_PATH \
     --sub_task metamath \

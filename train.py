@@ -52,6 +52,15 @@ class TrainingArguments(transformers.TrainingArguments):
     optim: str = field(default="adamw_torch")
     model_max_length: int = field(default=512,metadata={"help": "Maximum sequence length. Sequences will be right padded (and possibly truncated)."},)
     merge : Optional[bool] = field(default=False,metadata={"help": "Merge the PiSSA adapter to the residual model or LoRA to the base model"},)
+    # Moe setting
+    convert_from_llama: Optional[bool] = field(default=False)
+    num_fused_layers: Optional[int] = field(default=4)
+    num_experts: Optional[int] = field(default=16)
+    num_experts_per_tok: Optional[int] = field(default=8)
+    router_aux_loss_coef: Optional[float] = field(default=1e-3)
+    router_std: Optional[float] = field(default=0.02)
+    router_only: Optional[bool] = field(default=False)
+
 
 class SavePeftModelCallback(transformers.TrainerCallback):
     def save_model(self, args, state, kwargs):
@@ -157,20 +166,42 @@ def build_model(script_args, checkpoint_dir):
     if script_args.full_finetune:
         assert script_args.bits in [16, 32]
     compute_dtype = (torch.bfloat16 if script_args.bf16 else torch.float32)
-    model = transformers.AutoModelForCausalLM.from_pretrained(
-        script_args.model_name_or_path,
-        quantization_config=BitsAndBytesConfig(
-            load_in_4bit=script_args.bits == 4,
-            load_in_8bit=script_args.bits == 8,
-            llm_int8_threshold=6.0,
-            llm_int8_has_fp16_weight=False,
-            bnb_4bit_compute_dtype=compute_dtype,
-            bnb_4bit_use_double_quant=script_args.double_quant,
-            bnb_4bit_quant_type=script_args.quant_type,
-        ) if script_args.bits in [4, 8] else None,
-        torch_dtype=compute_dtype,
-        trust_remote_code=True,
-    )
+    if not script_args.convert_from_llama:
+        model = transformers.AutoModelForCausalLM.from_pretrained(
+            script_args.model_name_or_path,
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=script_args.bits == 4,
+                load_in_8bit=script_args.bits == 8,
+                llm_int8_threshold=6.0,
+                llm_int8_has_fp16_weight=False,
+                bnb_4bit_compute_dtype=compute_dtype,
+                bnb_4bit_use_double_quant=script_args.double_quant,
+                bnb_4bit_quant_type=script_args.quant_type,
+            ) if script_args.bits in [4, 8] else None,
+            torch_dtype=compute_dtype,
+            trust_remote_code=True,
+        )
+    else:
+        model = transformers.LlamaMoeForCausalLM.from_pretrained(
+            script_args.model_name_or_path,
+            num_fused_layers=script_args.num_fused_layers,
+            num_experts=script_args.num_experts,
+            num_experts_per_tok=script_args.num_experts_per_tok,
+            router_aux_loss_coef=script_args.router_aux_loss_coef,
+            router_initialization_method=script_args.router_std,
+            output_router_logits=True,
+
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=script_args.bits == 4,
+                load_in_8bit=script_args.bits == 8,
+            ) if script_args.bits in [4, 8] else None,
+            torch_dtype=compute_dtype,
+            trust_remote_code=True,
+        )
+
+    # add aux_loss
+    model.config.output_router_logits = True
+        
     setattr(model, 'model_parallel', True)
     setattr(model, 'is_parallelizable', True)
     # Tokenizer
@@ -201,10 +232,20 @@ def build_model(script_args, checkpoint_dir):
             )
             model = get_peft_model(model, peft_config)
 
+
     for name, module in model.named_modules():
-        if 'norm' in name or 'gate' in name:
+        if 'norm' in name or 'gate' in name or 'router' in name:
             module = module.to(torch.float32)
+
+    if script_args.router_only:
+        for name, param in model.named_parameters():
+            if 'router' in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
+    
     return model
+
 
 def train():
     parser = transformers.HfArgumentParser(TrainingArguments)
