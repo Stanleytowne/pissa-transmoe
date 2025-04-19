@@ -5,8 +5,6 @@ import os
 import json
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset, concatenate_datasets
-from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-from accelerate.utils import set_seed
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, help="Model path")
@@ -18,11 +16,28 @@ parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
 parser.add_argument('--temperature', type=float, default=0.0, help="Temperature")
 parser.add_argument('--top_p', type=float, default=1, help="Top-p sampling")
 parser.add_argument('--max_tokens', type=int, default=512, help="Max tokens")
-parser.add_argument('--seed', type=int, default=42, help="Random seed")
 args = parser.parse_args()
 
-# Set random seed for reproducibility
-set_seed(args.seed)
+# Load model and tokenizer
+print(f"Loading model from {args.model}...")
+model = AutoModelForCausalLM.from_pretrained(
+    args.model,
+    device_map="auto",
+    torch_dtype=torch.bfloat16,
+    trust_remote_code=True
+)
+if model.config.model_type == "llamamoe":
+    model.config.output_router_logits = False
+tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+
+# Generation config
+generation_config = {
+    "max_new_tokens": args.max_tokens,
+    "temperature": args.temperature,
+    "top_p": args.top_p,
+    "do_sample": args.temperature > 0,
+    "pad_token_id": tokenizer.eos_token_id
+}
 
 def batch_data(data_list, batch_size=1):
     n = len(data_list) // batch_size
@@ -36,38 +51,6 @@ def batch_data(data_list, batch_size=1):
     last_end = sys.maxsize
     batch_data.append(data_list[last_start:last_end])
     return batch_data
-
-# Load model and tokenizer
-print(f"Loading model from {args.model}...")
-tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-
-# Initialize model with empty weights
-with init_empty_weights():
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True
-    )
-
-# Load and dispatch model across available GPUs
-model = load_checkpoint_and_dispatch(
-    model,
-    args.model,
-    device_map="auto",
-    no_split_module_classes=["LlamaDecoderLayer"]
-)
-
-if model.config.model_type == "llamamoe":
-    model.config.output_router_logits = False
-
-# Generation config
-generation_config = {
-    "max_new_tokens": args.max_tokens,
-    "temperature": args.temperature,
-    "top_p": args.top_p,
-    "do_sample": args.temperature > 0,
-    "pad_token_id": tokenizer.eos_token_id
-}
 
 if args.sub_task is None:
     dataset = load_dataset(args.data_path, split=args.dataset_split)
@@ -93,10 +76,7 @@ for idx, (batch_query, batch_answer, batch_task) in enumerate(zip(batch_dataset_
     print(f"Processing batch {idx+1}/{len(batch_dataset_query)}")
     
     # Encode inputs
-    inputs = tokenizer(batch_query, padding=True, return_tensors="pt")
-    
-    # Move inputs to the same device as the model
-    inputs = {k: v.to(next(model.parameters()).device) for k, v in inputs.items()}
+    inputs = tokenizer(batch_query, padding=True, return_tensors="pt").to(model.device)
     
     with torch.no_grad():
         outputs = model.generate(
@@ -106,6 +86,8 @@ for idx, (batch_query, batch_answer, batch_task) in enumerate(zip(batch_dataset_
     
     # Decode outputs
     generated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+    generated_texts = [o.split("### Response:")[-1].strip() for o in generated_texts]
     
     # Save results
     for query, generated_text, answer, task in zip(batch_query, generated_texts, batch_answer, batch_task):
