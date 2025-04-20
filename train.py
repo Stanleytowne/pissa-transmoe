@@ -58,9 +58,10 @@ class TrainingArguments(transformers.TrainingArguments):
     num_experts: Optional[int] = field(default=16)
     num_experts_per_tok: Optional[int] = field(default=8)
     router_aux_loss_coef: Optional[float] = field(default=1e-3)
-    router_std: Optional[float] = field(default=0.02)
     router_only: Optional[bool] = field(default=False)
-
+    router_initialization_method: Optional[str] = field(default="nosharing")
+    router_weight_std: Optional[float] = field(default=0.02)
+    router_bias_init: Optional[float] = field(default=1e-3)
 
 class SavePeftModelCallback(transformers.TrainerCallback):
     def save_model(self, args, state, kwargs):
@@ -182,25 +183,28 @@ def build_model(script_args, checkpoint_dir):
             trust_remote_code=True,
         )
     else:
-        model = transformers.LlamaMoeForCausalLM.from_pretrained(
+        assert script_args.bits == 16, "Only 16-bit quantization is supported for LlamaMoe models"
+        if script_args.router_initialization_method == "random":
+            logger.warning(f"Initializing moe router with standard deviation {script_args.router_weight_std}."
+                           "Random initialization may lead to serious problems when using multiple GPUs.")
+        model = transformers.LlamaMoeForCausalLM.from_llama_pretrained(
             script_args.model_name_or_path,
             num_fused_layers=script_args.num_fused_layers,
             num_experts=script_args.num_experts,
             num_experts_per_tok=script_args.num_experts_per_tok,
             router_aux_loss_coef=script_args.router_aux_loss_coef,
-            router_initialization_method=script_args.router_std,
+            router_initialization_method=script_args.router_initialization_method, 
+            router_weight_std=script_args.router_weight_std,
+            router_bias_init=script_args.router_bias_init,
             output_router_logits=True,
 
-            quantization_config=BitsAndBytesConfig(
-                load_in_4bit=script_args.bits == 4,
-                load_in_8bit=script_args.bits == 8,
-            ) if script_args.bits in [4, 8] else None,
             torch_dtype=compute_dtype,
             trust_remote_code=True,
         )
 
     # add aux_loss
-    model.config.output_router_logits = True
+    if model.config.model_type == "LlamaMoeForCausalLM":
+        model.config.output_router_logits = True
         
     setattr(model, 'model_parallel', True)
     setattr(model, 'is_parallelizable', True)
@@ -244,6 +248,7 @@ def build_model(script_args, checkpoint_dir):
             else:
                 param.requires_grad = False
     
+    import code; code.interact(local=dict(globals(), **locals()))
     return model
 
 
