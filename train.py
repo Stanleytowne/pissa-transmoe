@@ -248,7 +248,6 @@ def build_model(script_args, checkpoint_dir):
             else:
                 param.requires_grad = False
     
-    import code; code.interact(local=dict(globals(), **locals()))
     return model
 
 
