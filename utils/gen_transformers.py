@@ -85,7 +85,7 @@ else:
             print("+"*100)
         all_test_dataset.append(ds)
         
-    dataset = concatenate_datasets(all_test_dataset)
+    dataset = concatenate_datasets(all_test_dataset).select(range(64))
 
 # Split dataset for multi-GPU processing
 total_samples = len(dataset)
@@ -131,6 +131,10 @@ for idx, (batch_query, batch_answer, batch_task) in enumerate(zip(batch_dataset_
             }, f, ensure_ascii=False)
             f.write('\n')
 
+# 创建完成标记文件
+with open(f"{args.output_file}.rank{local_rank}.done", 'w') as f:
+    f.write(f"GPU {local_rank} completed at {time.time()}")
+
 # after all processes are done, rank 0 process will merge all files
 if local_rank == 0:
     all_files_exist = False
@@ -138,7 +142,8 @@ if local_rank == 0:
         all_files_exist = True
         for rank in range(args.num_gpus):
             rank_file = f"{args.output_file}.rank{rank}"
-            if not os.path.exists(rank_file):
+            done_file = f"{args.output_file}.rank{rank}.done"
+            if not os.path.exists(rank_file) or not os.path.exists(done_file):
                 all_files_exist = False
                 time.sleep(1)
                 break
@@ -147,8 +152,10 @@ if local_rank == 0:
     with open(args.output_file, 'w', encoding='utf-8') as outfile:
         for rank in range(args.num_gpus):
             rank_file = f"{args.output_file}.rank{rank}"
+            done_file = f"{args.output_file}.rank{rank}.done"
             if os.path.exists(rank_file):
                 with open(rank_file, 'r', encoding='utf-8') as infile:
                     outfile.write(infile.read())
                 # delete temporary files
                 os.remove(rank_file)
+                os.remove(done_file)
